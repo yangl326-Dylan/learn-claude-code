@@ -68,10 +68,14 @@ def terminal_print(text: str):
     print(f"\r\033[K{text}")
     print(PROMPT + line, end="", flush=True)
 
-# ── Task System ──
-
-# Tasks are tiny durable records. Later systems add ownership, dependencies,
-# worktrees, and teammates on top of this same file-backed state.
+# ═══════════════════════════════════════════════════
+# 任务系统 (Task System) — s12 核心机制
+# ═══════════════════════════════════════════════════
+#
+# 任务是一份持久化到磁盘的小记录。后续的 worktree、队友自治认领、
+# 协议依赖检查都基于同一个 .tasks/*.json 文件系统。
+# 核心设计：任务持久化在文件而不是内存中，这样即使会话中断也能恢复。
+# 依赖关系用 blockedBy 表示，仅当所有前置任务 completed 后才能 claim。
 TASKS_DIR = WORKDIR / ".tasks"
 TASKS_DIR.mkdir(exist_ok=True)
 CURRENT_TODOS: list[dict] = []
@@ -169,10 +173,14 @@ def complete_task(task_id: str) -> str:
     return msg
 
 
-# ── Worktree System ──
-
-# Worktree names become filesystem paths, so the teaching version keeps the
-# validation rules strict and reuses them for create/remove/keep.
+# ═══════════════════════════════════════════════════
+# Worktree 隔离系统 — s18 核心机制
+# ═══════════════════════════════════════════════════
+#
+# Worktree 名称会映射为文件系统路径，所以教学版严格校验命名规则。
+# 每个 worktree 对应一个独立的 git worktree + 分支，
+# 任务通过 worktree 字段绑定到具体目录。
+# 关键设计：队友 claim 带 worktree 的任务后，其文件工具自动在隔离目录下执行。
 WORKTREES_DIR = WORKDIR / ".worktrees"
 WORKTREES_DIR.mkdir(exist_ok=True)
 
@@ -282,9 +290,14 @@ def keep_worktree(name: str) -> str:
     return f"Worktree '{name}' kept for review (branch: wt/{name})"
 
 
-# ── Skill Loading ──
-
-SKILL_REGISTRY: dict[str, dict] = {}
+# ═══════════════════════════════════════════════════
+# 技能加载系统 (Skill Loading) — s07 核心机制
+# ═══════════════════════════════════════════════════
+#
+# 技能按需加载，不在 system prompt 里塞全部内容。
+# 扫描 skills/ 目录下每个子目录的 SKILL.md，提取 frontmatter 元信息。
+# 关键设计：system prompt 只放技能目录（名称 + 描述），
+# 完整内容通过 load_skill(name) 工具按需加载。
 
 
 def _parse_frontmatter(text: str) -> tuple[dict, str]:
@@ -340,8 +353,13 @@ def load_skill(name: str) -> str:
     return skill["content"]
 
 
-# ── Prompt Assembly ──
-
+# ═══════════════════════════════════════════════════
+# Prompt 组装系统 — s10 核心机制
+# ═══════════════════════════════════════════════════
+#
+# system prompt 每轮根据当前上下文动态组装，不是硬编码的固定文本。
+# 由身份、工具列表、工作目录、时间、技能目录、记忆、MCP 状态等部分组成。
+# 关键设计：每轮调用 LLM 前都重新组装，确保模型能看到最新的上下文信息。
 PROMPT_SECTIONS = {
     "identity": "You are a coding agent. Act, don't explain.",
     "tools": "Available tools: bash, read_file, write_file, edit_file, glob, "
@@ -374,11 +392,13 @@ def assemble_system_prompt(context: dict) -> str:
     return "\n\n".join(sections)
 
 
-# ── Basic Tools ──
-
-def safe_path(p: str, cwd: Path = None) -> Path:
-    # File tools stay inside the workspace or teammate worktree. Bash remains
-    # powerful on purpose and is controlled by the permission hook instead.
+# ═══════════════════════════════════════════════════
+# 基础工具 (Basic Tools) — s01/s02 核心机制
+# ═══════════════════════════════════════════════════
+#
+# 提供安全文件操作和 shell 执行能力。
+# safe_path 确保文件读写不越界到工作区之外；
+# bash 保持强大能力，危险命令通过 Permission Hook 控制。
     base = cwd or WORKDIR
     path = (base / p).resolve()
     if not path.is_relative_to(base):
@@ -487,10 +507,13 @@ def run_todo_write(todos: list) -> str:
     return f"Updated {len(CURRENT_TODOS)} todos"
 
 
-# ── MessageBus ──
-
-# Team communication is append-only JSONL mailboxes. This keeps the protocol
-# inspectable on disk and lets background teammates send messages.
+# ═══════════════════════════════════════════════════
+# MessageBus — s15 团队通信核心机制
+# ═══════════════════════════════════════════════════
+#
+# 团队通信通过追加写入的 JSONL 邮箱实现。
+# 每个 agent 对应一个 .mailboxes/{agent}.jsonl 文件。
+# 关键设计：append-only 模式保证消息不丢失，磁盘文件可审计。
 MAILBOX_DIR = WORKDIR / ".mailboxes"
 MAILBOX_DIR.mkdir(exist_ok=True)
 
@@ -520,9 +543,12 @@ class MessageBus:
 BUS = MessageBus()
 active_teammates: dict[str, bool] = {}
 
-# ── Protocol State ──
-
-@dataclass
+# ═══════════════════════════════════════════════════
+# 协议状态 (Protocol State) — s16 核心机制
+# ═══════════════════════════════════════════════════
+#
+# 团队协议：队友提交 plan → lead 审批 → 队友收到结果后继续工作。
+# 核心设计：请求-响应通过 request_id 配对，一个响应不能批准另一个请求。
 class ProtocolState:
     request_id: str
     type: str
@@ -565,7 +591,14 @@ def consume_lead_inbox(route_protocol=True) -> list[dict]:
     return msgs
 
 
-# ── Autonomous Agent ──
+# ═══════════════════════════════════════════════════
+# 自治队友 (Autonomous Agent) — s17 核心机制
+# ═══════════════════════════════════════════════════
+#
+# 队友在没有收到消息时进入 idle 轮询模式：
+# 1) 先检查邮箱（协议消息优先级最高）
+# 2) 再扫描任务板，自动认领未分配的任务
+# 这是"看板模式"——没有 leader 分配，队友自己认领。
 
 IDLE_POLL_INTERVAL = 5
 IDLE_TIMEOUT = 60
@@ -619,7 +652,16 @@ def idle_poll(agent_name: str, messages: list,
     return "timeout"
 
 
-# ── Teammate Thread ──
+# ═══════════════════════════════════════════════════
+# 队友线程 (Teammate Thread) — s15-s17 综合
+# ═══════════════════════════════════════════════════
+#
+# 持久队友运行在独立 daemon 线程中，拥有自己的 messages 循环。
+# 通过 MessageBus 与 lead 和其他队友通信。
+# 关键行为：
+#   - claim 带 worktree 的任务后，文件工具自动切换到隔离目录
+#   - 提交 plan 后暂停工作，等待 lead 审批
+#   - 在 idle 时轮询邮箱 + 任务板
 
 def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
     if name in active_teammates:
@@ -840,7 +882,14 @@ def _teammate_submit_plan(from_name: str, plan: str) -> str:
     return f"Plan submitted ({req_id})"
 
 
-# ── Lead Protocol Tools ──
+# ═══════════════════════════════════════════════════
+# Lead 协议工具 — s16 核心机制
+# ═══════════════════════════════════════════════════
+#
+# Lead（主导 agent）通过这些工具管理队友：
+# - request_shutdown: 要求队友安全关闭
+# - request_plan: 要求队友提交计划
+# - review_plan: 批准/拒绝队友的 plan，附带反馈
 
 def run_request_shutdown(teammate: str) -> str:
     req_id = new_request_id()
@@ -871,10 +920,13 @@ def run_review_plan(request_id: str, approve: bool,
     return f"Plan {'approved' if approve else 'rejected'}"
 
 
-# ── Hooks + Permission Pipeline ──
-
-# Hooks are intentionally outside tool handlers. The loop can add permission,
-# logging, and stop behavior without changing each individual tool.
+# ═══════════════════════════════════════════════════
+# Hooks + 权限管线 — s03/s04 核心机制
+# ═══════════════════════════════════════════════════
+#
+# Hooks 在工具处理器之外执行。循环可以在不修改每个工具的情况下
+# 添加权限检查、日志记录和停止行为。
+# 核心事件：UserPromptSubmit / PreToolUse / PostToolUse / Stop
 HOOKS = {"UserPromptSubmit": [], "PreToolUse": [],
          "PostToolUse": [], "Stop": []}
 
@@ -959,8 +1011,13 @@ register_hook("PostToolUse", large_output_hook)
 register_hook("Stop", stop_hook)
 
 
-# ── Subagent Tool ──
-
+# ═══════════════════════════════════════════════════
+# Subagent 工具 — s06 核心机制
+# ═══════════════════════════════════════════════════
+#
+# 一次性 subagent：拥有独立的 messages[]，中间过程全部丢弃，
+# 只返回最终摘要。用于"上下文隔离"的场景——
+# 主 agent 不必被 subagent 的中间步骤污染上下文。
 SUB_SYSTEM = (
     f"You are a coding subagent at {WORKDIR}. "
     "Complete the task, then return a concise final summary. "
@@ -1052,11 +1109,13 @@ def spawn_subagent(description: str) -> str:
     return "Subagent finished without a text summary."
 
 
-# ── Context Compaction ──
-
-# Compaction is layered: first shrink oversized tool results, then trim old
-# message ranges, and only call the model for a summary when the context is
-# still too large or the model explicitly asks for compact.
+# ═══════════════════════════════════════════════════
+# 上下文压缩 (Context Compaction) — s08 核心机制
+# ═══════════════════════════════════════════════════
+#
+# 压缩分三层：先缩小过大的 tool_result，再裁剪旧消息范围，
+# 最后只有当上下文仍然太大或模型明确要求时才调用模型做摘要。
+# 这是典型的"渐进式压缩"策略——尽量无损，不得已才摘要。
 def estimate_size(messages: list) -> int:
     return len(json.dumps(messages, default=str))
 
@@ -1203,9 +1262,15 @@ def reactive_compact(messages: list) -> list:
             *messages[tail_start:]]
 
 
-# ── Error Recovery ──
-
-class RecoveryState:
+# ═══════════════════════════════════════════════════
+# 错误恢复 (Error Recovery) — s11 核心机制
+# ═══════════════════════════════════════════════════
+#
+# 四种恢复策略：
+#   429 (RateLimit): 指数退避重试
+#   529 (Overloaded): 指数退避 + 连续失败后切换 fallback 模型
+#   max_tokens: 先升级 token 数，再要求 continuation
+#   prompt too long: reactive compact 后重试
     def __init__(self):
         self.has_escalated = False
         self.recovery_count = 0
@@ -1256,10 +1321,13 @@ def is_prompt_too_long_error(e: Exception) -> bool:
             or "max_context_window" in msg)
 
 
-# ── Background Tasks ──
-
-# Slow tools return a placeholder tool_result immediately. Their real output is
-# later injected as a task_notification, so the main loop can keep moving.
+# ═══════════════════════════════════════════════════
+# 后台任务 (Background Tasks) — s13 核心机制
+# ═══════════════════════════════════════════════════
+#
+# 慢操作（如 build、test、install）在 daemon 线程中执行，
+# 主循环立即返回占位 tool_result，真实结果稍后通过
+# task_notification 注入回 messages。
 _bg_counter = 0
 background_tasks: dict[str, dict] = {}
 background_results: dict[str, str] = {}
@@ -1327,10 +1395,13 @@ def collect_background_results() -> list[str]:
     return notifications
 
 
-# ── Cron Scheduler ──
-
-# Cron jobs are stored separately from conversation history. When a job fires,
-# it becomes a scheduled prompt that is injected back into the same agent loop.
+# ═══════════════════════════════════════════════════
+# Cron 调度器 — s14 核心机制
+# ═══════════════════════════════════════════════════
+#
+# Cron 作业独立于会话历史存储。当作业触发时，
+# 生成 [Scheduled] prompt 注入到 agent 循环中。
+# 支持：持久化（跨会话存活）、一次性/循环、5 位 cron 表达式。
 DURABLE_PATH = WORKDIR / ".scheduled_tasks.json"
 
 
@@ -1528,10 +1599,13 @@ load_durable_jobs()
 threading.Thread(target=cron_scheduler_loop, daemon=True).start()
 
 
-# ── MCP System ──
-
-# MCP is modeled as late-bound tools: connect first, then discovered server
-# tools are merged into the normal tool pool with mcp__server__tool names.
+# ═══════════════════════════════════════════════════
+# MCP 系统 — s19 核心机制
+# ═══════════════════════════════════════════════════
+#
+# MCP 工具是"后绑定"的：先连接服务器，发现其工具列表，
+# 然后以 mcp__server__tool 命名方式合并到主工具池中。
+# 教学版使用 mock 服务器模拟 docs 和 deploy 两个服务。
 class MCPClient:
     """Discovers and calls tools on an MCP server (mock for teaching)."""
 
@@ -1645,7 +1719,11 @@ def assemble_tool_pool() -> tuple[list[dict], dict]:
     return tools, handlers
 
 
-# ── Lead Worktree Tools ──
+# ═══════════════════════════════════════════════════
+# Lead Worktree 工具 — s18 接口封装
+# ═══════════════════════════════════════════════════
+#
+# 对 worktree 系统的一层薄封装，以便注册到 BUILTIN_HANDLERS 中。
 
 def run_create_worktree(name: str, task_id: str = "") -> str:
     return create_worktree(name, task_id)
@@ -1657,7 +1735,12 @@ def run_keep_worktree(name: str) -> str:
     return keep_worktree(name)
 
 
-# ── Basic tool handlers ──
+# ═══════════════════════════════════════════════════
+# 基础工具处理器 (Basic Tool Handlers)
+# ═══════════════════════════════════════════════════
+#
+# 这些是 tools → handlers 映射中的工具实现函数。
+# 每个 handler 对应 BUILTIN_TOOLS 中的一个工具定义。
 
 def run_create_task(subject: str, description: str = "",
                     blockedBy: list[str] | None = None) -> str:
@@ -1718,10 +1801,13 @@ def run_connect_mcp(name: str) -> str:
     return connect_mcp(name)
 
 
-# ── Tool Definitions ──
-
-# The model sees tool schemas; Python executes handlers. S20 keeps both tables
-# explicit so every added capability is visible in one place.
+# ═══════════════════════════════════════════════════
+# 工具定义 (Tool Definitions)
+# ═══════════════════════════════════════════════════
+#
+# 模型看到的是 JSON schema 定义的工具；Python 执行 handlers。
+# S20 将所有工具定义和处理器显式列出，每一项能力都一目了然。
+# 这是 harness 的"工具注册中心"——新增能力就要在这里加一行。
 BUILTIN_TOOLS = [
     {"name": "bash", "description": "Run a shell command.",
      "input_schema": {"type": "object",
@@ -1890,9 +1976,12 @@ BUILTIN_HANDLERS = {
 }
 
 
-# ── Context ──
-
-MEMORY_DIR = WORKDIR / ".memory"
+# ═══════════════════════════════════════════════════
+# 上下文管理 (Context) — s09 记忆系统整合
+# ═══════════════════════════════════════════════════
+#
+# 每轮从 .memory/MEMORY.md 读取记忆、当前 MCP 连接和队友状态，
+# 组装成 context 字典供 system prompt 使用。
 MEMORY_INDEX = MEMORY_DIR / "MEMORY.md"
 
 
@@ -1907,9 +1996,21 @@ def update_context(context: dict, messages: list) -> dict:
     }
 
 
-# ── Agent Loop ──
-
-rounds_since_todo = 0
+# ═══════════════════════════════════════════════════
+# Agent 主循环 — 所有机制的归位点
+# ═══════════════════════════════════════════════════
+#
+# S20 的核心：同一个 while True 循环将 s01-s19 的所有机制串联在一起。
+# 每轮循环依次完成：
+#   1) 注入 cron 触发的定时任务
+#   2) 注入后台任务完成通知
+#   3) todo 提醒
+#   4) prepare_context: 压缩管线（逐层缩减上下文）
+#   5) update_context: 读取记忆、MCP 状态
+#   6) assemble_tool_pool: 重建工具池（含 MCP 动态工具）
+#   7) call_llm: 带错误恢复的模型调用
+#   8) 处理 tool_use block（permission → background → execute → hook）
+#   9) 循环回到 1
 agent_lock = threading.Lock()
 
 
@@ -2085,10 +2186,14 @@ def cron_autorun_loop(history: list, context: dict):
             print_turn_assistants(history, turn_start)
 
 
-if __name__ == "__main__":
-    CLI_ACTIVE = True
-    print("s20: comprehensive agent")
-    print("Enter a question, press Enter to send. Type q to quit.\n")
+# ═══════════════════════════════════════════════════
+# 入口点 (Main)
+# ═══════════════════════════════════════════════════
+#
+# CLI 模式：用户逐行输入，每轮调 agent_loop 处理。
+# 后台 cron_autorun_loop 线程每秒检查定时任务，
+# 命中时自动注入 [Scheduled] 消息并运行 agent 循环。
+# 队友的协议响应通过 check_inbox 拉取并自动处理。
     history = []
     context = update_context({}, [])
     threading.Thread(target=cron_autorun_loop,
